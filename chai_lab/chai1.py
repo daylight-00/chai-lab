@@ -299,7 +299,7 @@ class StructureCandidates:
 def make_all_atom_feature_context(
     fasta_file: Path,
     *,
-    output_dir: Path,
+    # output_dir: Path,
     use_esm_embeddings: bool = True,
     use_msa_server: bool = False,
     msa_server_url: str = "https://api.colabfold.com",
@@ -340,7 +340,9 @@ def make_all_atom_feature_context(
             for chain in chains
             if chain.entity_data.entity_type == EntityType.PROTEIN
         ]
-        msa_dir = output_dir / "msas"
+        # msa_dir = output_dir / "msas"
+        msa_dir = "msas"
+
         msa_dir.mkdir(parents=True, exist_ok=False)
         generate_colabfold_msas(
             protein_seqs=protein_sequences,
@@ -429,7 +431,7 @@ def make_all_atom_feature_context(
 def run_inference(
     fasta_file: Path,
     *,
-    output_dir: Path,
+    # output_dir: Path,
     use_esm_embeddings: bool = True,
     use_msa_server: bool = False,
     msa_server_url: str = "https://api.colabfold.com",
@@ -442,16 +444,16 @@ def run_inference(
     device: str | None = None,
     low_memory: bool = True,
 ) -> StructureCandidates:
-    if output_dir.exists():
-        assert not any(
-            output_dir.iterdir()
-        ), f"Output directory {output_dir} is not empty."
+    # if output_dir.exists():
+    #     assert not any(
+    #         output_dir.iterdir()
+    #     ), f"Output directory {output_dir} is not empty."
 
     torch_device = torch.device(device if device is not None else "cuda:0")
 
     feature_context = make_all_atom_feature_context(
         fasta_file=fasta_file,
-        output_dir=output_dir,
+        # output_dir=output_dir,
         use_esm_embeddings=use_esm_embeddings,
         use_msa_server=use_msa_server,
         msa_server_url=msa_server_url,
@@ -462,9 +464,9 @@ def run_inference(
 
     return run_folding_on_context(
         feature_context,
-        output_dir=output_dir,
+        # output_dir=output_dir,
         num_trunk_recycles=num_trunk_recycles,
-        num_diffn_timesteps=num_diffn_timesteps,
+        # num_diffn_timesteps=num_diffn_timesteps,
         seed=seed,
         device=torch_device,
         low_memory=low_memory,
@@ -479,10 +481,10 @@ def _bin_centers(min_bin: float, max_bin: float, no_bins: int) -> Tensor:
 def run_folding_on_context(
     feature_context: AllAtomFeatureContext,
     *,
-    output_dir: Path,
+    # output_dir: Path,
     # expose some params for easy tweaking
     num_trunk_recycles: int = 3,
-    num_diffn_timesteps: int = 200,
+    # num_diffn_timesteps: int = 200,
     seed: int | None = None,
     device: torch.device | None = None,
     low_memory: bool,
