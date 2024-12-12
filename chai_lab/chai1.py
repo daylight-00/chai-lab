@@ -3,17 +3,17 @@
 # See the LICENSE file for details.
 
 
-import math
+# import math
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-import numpy as np
+# import numpy as np
 import torch
 import torch.export
-from einops import einsum, rearrange, repeat
+# from einops import einsum, rearrange, repeat
 from torch import Tensor
-from tqdm import tqdm
+# from tqdm import tqdm
 
 from chai_lab.data.collate.collate import Collate
 from chai_lab.data.collate.utils import AVAILABLE_MODEL_SIZES
@@ -86,15 +86,15 @@ from chai_lab.data.features.generators.token_dist_restraint import (
 from chai_lab.data.features.generators.token_pair_pocket_restraint import (
     TokenPairPocketRestraint,
 )
-from chai_lab.data.io.cif_utils import save_to_cif
+# from chai_lab.data.io.cif_utils import save_to_cif
 from chai_lab.data.parsing.restraints import parse_pairwise_table
 from chai_lab.data.parsing.structure.entity_type import EntityType
-from chai_lab.model.diffusion_schedules import InferenceNoiseSchedule
-from chai_lab.model.utils import center_random_augmentation
-from chai_lab.ranking.frames import get_frames_and_mask
-from chai_lab.ranking.rank import SampleRanking, get_scores, rank
+# from chai_lab.model.diffusion_schedules import InferenceNoiseSchedule
+# from chai_lab.model.utils import center_random_augmentation
+# from chai_lab.ranking.frames import get_frames_and_mask
+from chai_lab.ranking.rank import SampleRanking
 from chai_lab.utils.paths import chai1_component
-from chai_lab.utils.plot import plot_msa
+# from chai_lab.utils.plot import plot_msa
 from chai_lab.utils.tensor_utils import move_data_to_device, set_seed, und_self
 from chai_lab.utils.typing import Float, typecheck
 
@@ -558,8 +558,8 @@ def run_folding_on_context(
     bond_loss_input_proj = load_exported("bond_loss_input_proj.pt", device)
     token_input_embedder = load_exported("token_embedder.pt", device)
     trunk = load_exported("trunk.pt", device)
-    diffusion_module = load_exported("diffusion_module.pt", device)
-    confidence_head = load_exported("confidence_head.pt", device)
+    # diffusion_module = load_exported("diffusion_module.pt", device)
+    # confidence_head = load_exported("confidence_head.pt", device)
 
     ##
     ## Run the features through the feature embedder
@@ -630,7 +630,8 @@ def run_folding_on_context(
     # the subsequent recycle
     token_single_trunk_repr = token_single_initial_repr
     token_pair_trunk_repr = token_pair_initial_repr
-    for _ in tqdm(range(num_trunk_recycles), desc="Trunk recycles"):
+    # for _ in tqdm(range(num_trunk_recycles), desc="Trunk recycles"):
+    for _ in range(num_trunk_recycles):
         (token_single_trunk_repr, token_pair_trunk_repr) = trunk.forward(
             move_to_device=device,
             token_single_trunk_initial_repr=token_single_initial_repr,
@@ -645,274 +646,5 @@ def run_folding_on_context(
             token_pair_mask=token_pair_mask,
             crop_size=model_size,
         )
-    # We won't be using the trunk anymore; remove it from memory
-    del trunk
-    torch.cuda.empty_cache()
 
-    ##
-    ## Denoise the trunk representation by passing it through the diffusion module
-    ##
-
-    atom_single_mask = atom_single_mask.to(device)
-
-    static_diffusion_inputs = dict(
-        token_single_initial_repr=token_single_structure_input.float(),
-        token_pair_initial_repr=token_pair_structure_input_feats.float(),
-        token_single_trunk_repr=token_single_trunk_repr.float(),
-        token_pair_trunk_repr=token_pair_trunk_repr.float(),
-        atom_single_input_feats=atom_single_structure_input_feats.float(),
-        atom_block_pair_input_feats=block_atom_pair_structure_input_feats.float(),
-        atom_single_mask=atom_single_mask,
-        atom_block_pair_mask=block_atom_pair_mask,
-        token_single_mask=token_single_mask,
-        block_indices_h=block_indices_h,
-        block_indices_w=block_indices_w,
-        atom_token_indices=atom_token_indices,
-    )
-    static_diffusion_inputs = move_data_to_device(
-        static_diffusion_inputs, device=device
-    )
-
-    def _denoise(atom_pos: Tensor, sigma: Tensor, s: int) -> Tensor:
-        atom_noised_coords = rearrange(
-            atom_pos, "(b s) ... -> b s ...", s=s
-        ).contiguous()
-        noise_sigma = repeat(sigma, " -> b s", b=batch_size, s=s)
-        return diffusion_module.forward(
-            atom_noised_coords=atom_noised_coords.float(),
-            noise_sigma=noise_sigma.float(),
-            crop_size=model_size,
-            **static_diffusion_inputs,
-        )
-
-    num_diffn_samples = 5  # Fixed at export time
-    inference_noise_schedule = InferenceNoiseSchedule(
-        s_max=DiffusionConfig.S_tmax,
-        s_min=4e-4,
-        p=7.0,
-        sigma_data=DiffusionConfig.sigma_data,
-    )
-    sigmas = inference_noise_schedule.get_schedule(
-        device=device, num_timesteps=num_diffn_timesteps
-    )
-    gammas = torch.where(
-        (sigmas >= DiffusionConfig.S_tmin) & (sigmas <= DiffusionConfig.S_tmax),
-        min(DiffusionConfig.S_churn / num_diffn_timesteps, math.sqrt(2) - 1),
-        0.0,
-    )
-
-    sigmas_and_gammas = list(zip(sigmas[:-1], sigmas[1:], gammas[:-1]))
-
-    # Initial atom positions
-    _, num_atoms = atom_single_mask.shape
-    atom_pos = sigmas[0] * torch.randn(
-        batch_size * num_diffn_samples, num_atoms, 3, device=device
-    )
-
-    for sigma_curr, sigma_next, gamma_curr in tqdm(
-        sigmas_and_gammas, desc="Diffusion steps"
-    ):
-        # Center coords
-        atom_pos = center_random_augmentation(
-            atom_pos,
-            atom_single_mask=repeat(
-                atom_single_mask,
-                "b a -> (b s) a",
-                s=num_diffn_samples,
-            ),
-        )
-
-        # Alg 2. lines 4-6
-        noise = DiffusionConfig.S_noise * torch.randn(
-            atom_pos.shape, device=atom_pos.device
-        )
-        sigma_hat = sigma_curr + gamma_curr * sigma_curr
-        atom_pos_noise = (sigma_hat**2 - sigma_curr**2).clamp_min(1e-6).sqrt()
-        atom_pos_hat = atom_pos + noise * atom_pos_noise
-
-        # Lines 7-8
-        denoised_pos = _denoise(
-            atom_pos=atom_pos_hat,
-            sigma=sigma_hat,
-            s=num_diffn_samples,
-        )
-        d_i = (atom_pos_hat - denoised_pos) / sigma_hat
-        atom_pos = atom_pos_hat + (sigma_next - sigma_hat) * d_i
-
-        # Lines 9-11
-        if sigma_next != 0 and DiffusionConfig.second_order:  # second order update
-            denoised_pos = _denoise(
-                atom_pos,
-                sigma=sigma_next,
-                s=num_diffn_samples,
-            )
-            d_i_prime = (atom_pos - denoised_pos) / sigma_next
-            atom_pos = atom_pos + (sigma_next - sigma_hat) * ((d_i_prime + d_i) / 2)
-
-    # We won't be running diffusion anymore
-    del diffusion_module, static_diffusion_inputs
-    torch.cuda.empty_cache()
-
-    ##
-    ## Run the confidence model
-    ##
-
-    confidence_outputs: list[tuple[Tensor, ...]] = [
-        confidence_head.forward(
-            move_to_device=device,
-            token_single_input_repr=token_single_initial_repr,
-            token_single_trunk_repr=token_single_trunk_repr,
-            token_pair_trunk_repr=token_pair_trunk_repr,
-            token_single_mask=token_single_mask,
-            atom_single_mask=atom_single_mask,
-            atom_coords=atom_pos[s : s + 1],
-            token_reference_atom_index=token_reference_atom_index,
-            atom_token_index=atom_token_indices,
-            atom_within_token_index=atom_within_token_index,
-            crop_size=model_size,
-        )
-        for s in range(num_diffn_samples)
-    ]
-
-    pae_logits, pde_logits, plddt_logits = [
-        torch.cat(single_sample, dim=0)
-        for single_sample in zip(*confidence_outputs, strict=True)
-    ]
-
-    assert atom_pos.shape[0] == num_diffn_samples
-    assert pae_logits.shape[0] == num_diffn_samples
-
-    def softmax_einsum_and_cpu(
-        logits: Tensor, bin_mean: Tensor, pattern: str
-    ) -> Tensor:
-        # utility to compute score from bin logits
-        res = einsum(
-            logits.float().softmax(dim=-1), bin_mean.to(logits.device), pattern
-        )
-        return res.to(device="cpu")
-
-    token_mask_1d = rearrange(token_single_mask, "1 b -> b")
-
-    pae_scores = softmax_einsum_and_cpu(
-        pae_logits[:, token_mask_1d, :, :][:, :, token_mask_1d, :],
-        _bin_centers(0.0, 32.0, 64),
-        "b n1 n2 d, d -> b n1 n2",
-    )
-
-    pde_scores = softmax_einsum_and_cpu(
-        pde_logits[:, token_mask_1d, :, :][:, :, token_mask_1d, :],
-        _bin_centers(0.0, 32.0, 64),
-        "b n1 n2 d, d -> b n1 n2",
-    )
-
-    plddt_scores_atom = softmax_einsum_and_cpu(
-        plddt_logits,
-        _bin_centers(0, 1, plddt_logits.shape[-1]),
-        "b a d, d -> b a",
-    )
-
-    # converting per-atom plddt to per-token
-    [mask] = atom_single_mask.cpu()
-    [indices] = atom_token_indices.cpu()
-
-    def avg_per_token_1d(x):
-        n = torch.bincount(indices[mask], weights=x[mask])
-        d = torch.bincount(indices[mask]).clamp(min=1)
-        return n / d
-
-    plddt_scores = torch.stack([avg_per_token_1d(x) for x in plddt_scores_atom])
-
-    ##
-    ## Write the outputs
-    ##
-    # Move data to the CPU so we don't hit GPU memory limits
-    inputs = move_data_to_device(inputs, torch.device("cpu"))
-    atom_pos = atom_pos.cpu()
-    plddt_logits = plddt_logits.cpu()
-    pae_logits = pae_logits.cpu()
-
-    # Plot coverage of tokens by MSA, save plot
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    if feature_context.msa_context.mask.any():
-        msa_plot_path = plot_msa(
-            input_tokens=feature_context.structure_context.token_residue_type,
-            msa_tokens=feature_context.msa_context.tokens,
-            out_fname=output_dir / "msa_depth.pdf",
-        )
-    else:
-        msa_plot_path = None
-
-    cif_paths: list[Path] = []
-    ranking_data: list[SampleRanking] = []
-
-    for idx in range(num_diffn_samples):
-        ##
-        ## Compute ranking scores
-        ##
-
-        _, valid_frames_mask = get_frames_and_mask(
-            atom_pos[idx : idx + 1],
-            inputs["token_asym_id"],
-            inputs["token_residue_index"],
-            inputs["token_backbone_frame_mask"],
-            inputs["token_centre_atom_index"],
-            inputs["token_exists_mask"],
-            inputs["atom_exists_mask"],
-            inputs["token_backbone_frame_index"],
-            inputs["atom_token_index"],
-        )
-
-        ranking_outputs = rank(
-            atom_pos[idx : idx + 1],
-            atom_mask=inputs["atom_exists_mask"],
-            atom_token_index=inputs["atom_token_index"],
-            token_exists_mask=inputs["token_exists_mask"],
-            token_asym_id=inputs["token_asym_id"],
-            token_entity_type=inputs["token_entity_type"],
-            token_valid_frames_mask=valid_frames_mask,
-            lddt_logits=plddt_logits[idx : idx + 1],
-            lddt_bin_centers=_bin_centers(0, 1, plddt_logits.shape[-1]).to(
-                plddt_logits.device
-            ),
-            pae_logits=pae_logits[idx : idx + 1],
-            pae_bin_centers=_bin_centers(0.0, 32.0, 64).to(pae_logits.device),
-        )
-
-        ranking_data.append(ranking_outputs)
-
-        ##
-        ## Write output files
-        ##
-
-        cif_out_path = output_dir.joinpath(f"pred.model_idx_{idx}.cif")
-        aggregate_score = ranking_outputs.aggregate_score.item()
-        print(f"Score={aggregate_score:.4f}, writing output to {cif_out_path}")
-
-        # use 0-100 scale for pLDDT in pdb outputs
-        scaled_plddt_scores_per_atom = 100 * plddt_scores_atom[idx : idx + 1]
-
-        save_to_cif(
-            coords=atom_pos[idx : idx + 1],
-            bfactors=scaled_plddt_scores_per_atom,
-            output_batch=inputs,
-            write_path=cif_out_path,
-            entity_names={
-                c.entity_data.entity_id: c.entity_data.entity_name
-                for c in feature_context.chains
-            },
-        )
-        cif_paths.append(cif_out_path)
-
-        scores_out_path = output_dir.joinpath(f"scores.model_idx_{idx}.npz")
-
-        np.savez(scores_out_path, **get_scores(ranking_outputs))
-
-    return StructureCandidates(
-        cif_paths=cif_paths,
-        ranking_data=ranking_data,
-        msa_coverage_plot_path=msa_plot_path,
-        pae=pae_scores,
-        pde=pde_scores,
-        plddt=plddt_scores,
-    )
+    return (token_single_trunk_repr, token_pair_trunk_repr)
