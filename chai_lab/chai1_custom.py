@@ -15,7 +15,7 @@ import torch.export
 from torch import Tensor
 # from tqdm import tqdm
 
-from chai_lab.data.collate.collate import Collate
+from chai_lab.data.collate.collate_custom import Collate
 from chai_lab.data.collate.utils import AVAILABLE_MODEL_SIZES
 from chai_lab.data.dataset.all_atom_feature_context import (
     MAX_MSA_DEPTH,
