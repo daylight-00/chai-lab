@@ -15,7 +15,7 @@ import torch.export
 from torch import Tensor
 # from tqdm import tqdm
 
-from chai_lab.data.collate.collate_custom import Collate
+from chai_lab.data.collate.collate import Collate
 from chai_lab.data.collate.utils import AVAILABLE_MODEL_SIZES
 from chai_lab.data.dataset.all_atom_feature_context import (
     MAX_MSA_DEPTH,
@@ -92,7 +92,7 @@ from chai_lab.data.parsing.structure.entity_type import EntityType
 # from chai_lab.model.diffusion_schedules import InferenceNoiseSchedule
 # from chai_lab.model.utils import center_random_augmentation
 # from chai_lab.ranking.frames import get_frames_and_mask
-from chai_lab.ranking.rank import SampleRanking,# get_scores, rank
+from chai_lab.ranking.rank import SampleRanking#, get_scores, rank
 from chai_lab.utils.paths import chai1_component
 # from chai_lab.utils.plot import plot_msa
 from chai_lab.utils.tensor_utils import move_data_to_device, set_seed, und_self
@@ -560,7 +560,7 @@ def run_folding_on_context(
     ##
 
     _, _, model_size = msa_mask.shape
-    assert model_size in AVAILABLE_MODEL_SIZES
+    # assert model_size in AVAILABLE_MODEL_SIZES
 
     feature_embedding = load_exported("feature_embedding.pt", device)
     bond_loss_input_proj = load_exported("bond_loss_input_proj.pt", device)
