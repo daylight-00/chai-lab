@@ -341,8 +341,10 @@ def make_all_atom_feature_context(
             if chain.entity_data.entity_type == EntityType.PROTEIN
         ]
         # msa_dir = output_dir / "msas"
-        msa_dir = "msas"
-
+        msa_dir = Path("msas")
+        if msa_dir.exists():
+            import shutil
+            shutil.rmtree(msa_dir)
         msa_dir.mkdir(parents=True, exist_ok=False)
         generate_colabfold_msas(
             protein_seqs=protein_sequences,
