@@ -127,16 +127,34 @@ class ModuleWrapper:
             return result
 
 
+# def load_exported(comp_key: str, device: torch.device) -> ModuleWrapper:
+#     torch.jit.set_fusion_strategy([("STATIC", 0), ("DYNAMIC", 0)])
+#     local_path = chai1_component(comp_key)
+#     assert isinstance(device, torch.device)
+#     if device != torch.device("cuda:0"):
+#         # load on cpu first, then move to device
+#         return ModuleWrapper(torch.jit.load(local_path, map_location="cpu").to(device))
+#     else:
+#         # skip loading on CPU.
+#         return ModuleWrapper(torch.jit.load(local_path).to(device))
+
+# 250128 Add cache for loaded models
+_loaded_models = {}
 def load_exported(comp_key: str, device: torch.device) -> ModuleWrapper:
+    global _loaded_models
+    if comp_key in _loaded_models:
+        return _loaded_models[comp_key]
     torch.jit.set_fusion_strategy([("STATIC", 0), ("DYNAMIC", 0)])
     local_path = chai1_component(comp_key)
     assert isinstance(device, torch.device)
     if device != torch.device("cuda:0"):
         # load on cpu first, then move to device
-        return ModuleWrapper(torch.jit.load(local_path, map_location="cpu").to(device))
+        module = ModuleWrapper(torch.jit.load(local_path, map_location="cpu").to(device))
     else:
         # skip loading on CPU.
-        return ModuleWrapper(torch.jit.load(local_path).to(device))
+        module = ModuleWrapper(torch.jit.load(local_path).to(device))
+    _loaded_models[comp_key] = module
+    return module
 
 
 # %%
