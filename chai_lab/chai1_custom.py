@@ -3,10 +3,13 @@
 # See the LICENSE file for details.
 
 
+import itertools
+# import logging
 # import math
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 
 # import numpy as np
 import torch
@@ -32,13 +35,19 @@ from chai_lab.data.dataset.inference_dataset import load_chains_from_raw, read_i
 from chai_lab.data.dataset.msas.colabfold import generate_colabfold_msas
 from chai_lab.data.dataset.msas.load import get_msa_contexts
 from chai_lab.data.dataset.msas.msa_context import MSAContext
+from chai_lab.data.dataset.msas.utils import (
+    subsample_and_reorder_msa_feats_n_mask,
+)
 from chai_lab.data.dataset.structure.all_atom_structure_context import (
     AllAtomStructureContext,
 )
 from chai_lab.data.dataset.structure.bond_utils import (
     get_atom_covalent_bond_pairs_from_constraints,
 )
-from chai_lab.data.dataset.templates.context import TemplateContext
+from chai_lab.data.dataset.templates.context import (
+    TemplateContext,
+    get_template_context,
+)
 from chai_lab.data.features.feature_factory import FeatureFactory
 from chai_lab.data.features.feature_type import FeatureType
 from chai_lab.data.features.generators.atom_element import AtomElementOneHot
@@ -313,21 +322,43 @@ class StructureCandidates:
             plddt=self.plddt[idx],
         )
 
+    @classmethod
+    def concat(
+        cls, candidates: Sequence["StructureCandidates"]
+    ) -> "StructureCandidates":
+        return cls(
+            cif_paths=list(
+                itertools.chain.from_iterable([c.cif_paths for c in candidates])
+            ),
+            ranking_data=list(
+                itertools.chain.from_iterable([c.ranking_data for c in candidates])
+            ),
+            msa_coverage_plot_path=candidates[0].msa_coverage_plot_path,
+            pae=torch.cat([c.pae for c in candidates]),
+            pde=torch.cat([c.pde for c in candidates]),
+            plddt=torch.cat([c.plddt for c in candidates]),
+        )
+
 
 def make_all_atom_feature_context(
     fasta_file: Path,
     *,
-    # output_dir: Path,
+    output_dir: Path,
     use_esm_embeddings: bool = True,
     use_msa_server: bool = False,
     msa_server_url: str = "https://api.colabfold.com",
     msa_directory: Path | None = None,
     constraint_path: Path | None = None,
+    use_templates_server: bool = False,
+    templates_path: Path | None = None,
     esm_device: torch.device = torch.device("cpu"),
 ):
     assert not (
         use_msa_server and msa_directory
     ), "Cannot specify both MSA server and directory"
+    assert not (
+        use_templates_server and templates_path
+    ), "Cannot specify both templates server and path"
 
     # Prepare inputs
     assert fasta_file.exists(), fasta_file
@@ -358,17 +389,18 @@ def make_all_atom_feature_context(
             for chain in chains
             if chain.entity_data.entity_type == EntityType.PROTEIN
         ]
-        # msa_dir = output_dir / "msas"
-        msa_dir = Path("msas")
-        if msa_dir.exists():
-            import shutil
-            shutil.rmtree(msa_dir)
+        msa_dir = output_dir / "msas"
         msa_dir.mkdir(parents=True, exist_ok=False)
         generate_colabfold_msas(
             protein_seqs=protein_sequences,
             msa_dir=msa_dir,
+            search_templates=use_templates_server,
             msa_server_url=msa_server_url,
         )
+        if use_templates_server:  # Override templates path with server path
+            assert templates_path is None
+            templates_path = msa_dir / "all_chain_templates.m8"
+            assert templates_path.is_file()
         msa_context, msa_profile_context = get_msa_contexts(
             chains, msa_directory=msa_dir
         )
@@ -389,10 +421,22 @@ def make_all_atom_feature_context(
     ), f"Discrepant tokens in input and MSA: {merged_context.num_tokens} != {msa_context.num_tokens}"
 
     # Load templates
-    template_context = TemplateContext.empty(
-        n_tokens=n_actual_tokens,
-        n_templates=MAX_NUM_TEMPLATES,
-    )
+    if templates_path is None:
+        assert not use_templates_server, "Server should have written a path"
+        template_context = TemplateContext.empty(
+            n_tokens=n_actual_tokens,
+            n_templates=MAX_NUM_TEMPLATES,
+        )
+    else:
+        # NOTE templates m8 file should contain hits with query name matching chain entity_names
+        # or the hash of the chain sequence. When we query the server, we use the hash of the
+        # sequence to identify each hit.
+        template_context = get_template_context(
+            chains=chains,
+            use_sequence_hash_for_lookup=use_templates_server,
+            template_hits_m8=templates_path,
+            template_cif_cache_folder=output_dir / "templates",
+        )
 
     # Load ESM embeddings
     if use_esm_embeddings:
@@ -428,6 +472,11 @@ def make_all_atom_feature_context(
                     torch.concatenate([orig_a, cov_a]),
                     torch.concatenate([orig_b, cov_b]),
                 )
+            assert (
+                merged_context.atom_covalent_bond_indices[0].numel()
+                == merged_context.atom_covalent_bond_indices[1].numel()
+                > 0
+            )
     else:
         restraint_context = RestraintContext.empty()
 
@@ -451,20 +500,26 @@ def make_all_atom_feature_context(
 def run_inference(
     fasta_file: Path,
     *,
-    # output_dir: Path,
+    output_dir: Path,
+    # Configuration for ESM, MSA, constraints, and templates
     use_esm_embeddings: bool = True,
     use_msa_server: bool = False,
     msa_server_url: str = "https://api.colabfold.com",
     msa_directory: Path | None = None,
     constraint_path: Path | None = None,
-    # expose some params for easy tweaking
+    use_templates_server: bool = False,
+    template_hits_path: Path | None = None,
+    # Parameters controlling how we do inference
+    recycle_msa_subsample: int = 0,
     num_trunk_recycles: int = 3,
     # num_diffn_timesteps: int = 200,
     # num_diffn_samples: int = 5,
+    num_trunk_samples: int = 1,
     seed: int | None = None,
     device: str | None = None,
     low_memory: bool = True,
 ) -> StructureCandidates:
+    # assert num_trunk_samples > 0 and num_diffn_samples > 0
     # if output_dir.exists():
     #     assert not any(
     #         output_dir.iterdir()
@@ -474,7 +529,7 @@ def run_inference(
 
     feature_context = make_all_atom_feature_context(
         fasta_file=fasta_file,
-        # output_dir=output_dir,
+        output_dir=output_dir,
         use_esm_embeddings=use_esm_embeddings,
         use_msa_server=use_msa_server,
         msa_server_url=msa_server_url,
@@ -482,6 +537,27 @@ def run_inference(
         constraint_path=constraint_path,
         esm_device=torch_device,
     )
+
+    # all_candidates: list[StructureCandidates] = []
+    # for trunk_idx in range(num_trunk_samples):
+    #     # logging.info(f"Trunk sample {trunk_idx + 1}/{num_trunk_samples}")
+    #     cand = run_folding_on_context(
+    #         feature_context,
+    #         output_dir=(
+    #             output_dir / f"trunk_{trunk_idx}"
+    #             if num_trunk_samples > 1
+    #             else output_dir
+    #         ),
+    #         num_trunk_recycles=num_trunk_recycles,
+    #         # num_diffn_timesteps=num_diffn_timesteps,
+    #         # num_diffn_samples=num_diffn_samples,
+    #         recycle_msa_subsample=recycle_msa_subsample,
+    #         seed=seed + trunk_idx if seed is not None else None,
+    #         device=torch_device,
+    #         low_memory=low_memory,
+    #     )
+    #     all_candidates.append(cand)
+    # return StructureCandidates.concat(all_candidates)
 
     return run_folding_on_context(
         feature_context,
@@ -494,9 +570,8 @@ def run_inference(
         low_memory=low_memory,
     )
 
-
-def _bin_centers(min_bin: float, max_bin: float, no_bins: int) -> Tensor:
-    return torch.linspace(min_bin, max_bin, 2 * no_bins + 1)[1::2]
+# def _bin_centers(min_bin: float, max_bin: float, no_bins: int) -> Tensor:
+#     return torch.linspace(min_bin, max_bin, 2 * no_bins + 1)[1::2]
 
 
 @torch.no_grad()
@@ -505,6 +580,7 @@ def run_folding_on_context(
     *,
     # output_dir: Path,
     # expose some params for easy tweaking
+    recycle_msa_subsample: int = 0,
     num_trunk_recycles: int = 3,
     # num_diffn_timesteps: int = 200,
     # # all diffusion samples come from the same trunk
@@ -565,8 +641,8 @@ def run_folding_on_context(
     atom_token_indices = inputs["atom_token_index"].long()
     token_single_mask = inputs["token_exists_mask"]
     token_pair_mask = und_self(token_single_mask, "b i, b j -> b i j")
-    token_reference_atom_index = inputs["token_ref_atom_index"]
-    atom_within_token_index = inputs["atom_within_token_index"]
+    # token_reference_atom_index = inputs["token_ref_atom_index"]
+    # atom_within_token_index = inputs["atom_within_token_index"]
     msa_mask = inputs["msa_mask"]
     template_input_masks = und_self(
         inputs["template_mask"], "b t n1, b t n2 -> b t n1 n2"
@@ -658,14 +734,28 @@ def run_folding_on_context(
     token_pair_trunk_repr = token_pair_initial_repr
     # for _ in tqdm(range(num_trunk_recycles), desc="Trunk recycles"):
     for _ in range(num_trunk_recycles):
+        subsampled_msa_input_feats, subsampled_msa_mask = None, None
+        if recycle_msa_subsample > 0:
+            subsampled_msa_input_feats, subsampled_msa_mask = (
+                subsample_and_reorder_msa_feats_n_mask(
+                    msa_input_feats,
+                    msa_mask,
+                )
+            )
         (token_single_trunk_repr, token_pair_trunk_repr) = trunk.forward(
             move_to_device=device,
             token_single_trunk_initial_repr=token_single_initial_repr,
             token_pair_trunk_initial_repr=token_pair_initial_repr,
             token_single_trunk_repr=token_single_trunk_repr,  # recycled
             token_pair_trunk_repr=token_pair_trunk_repr,  # recycled
-            msa_input_feats=msa_input_feats,
-            msa_mask=msa_mask,
+            msa_input_feats=(
+                subsampled_msa_input_feats
+                if subsampled_msa_input_feats is not None
+                else msa_input_feats
+            ),
+            msa_mask=(
+                subsampled_msa_mask if subsampled_msa_mask is not None else msa_mask
+            ),
             template_input_feats=template_input_feats,
             template_input_masks=template_input_masks,
             token_single_mask=token_single_mask,
